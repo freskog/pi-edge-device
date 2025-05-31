@@ -1,0 +1,9 @@
+pvporcupine
+soundfile
+sounddevice
+websockets
+numpy<2
+pyaudio
+openwakeword
+scipy
+tflite-runtime
