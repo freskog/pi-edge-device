@@ -16,6 +16,10 @@ build/
 # Environment variables
 .env
 
+# all venvs 
+.venv-edge-pi/
+.venv-edge/
+
 # Logs
 *.log
 

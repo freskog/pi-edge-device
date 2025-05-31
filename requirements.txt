@@ -1,9 +1,5 @@
-pvporcupine
+numpy>=1.22.0,<2
+pvporcupine>=2.2.0
 soundfile
 sounddevice
 websockets
-numpy<2
-pyaudio
-openwakeword
-scipy
-tflite-runtime

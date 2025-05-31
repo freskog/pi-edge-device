@@ -42,6 +42,7 @@ class SimpleAudioClient:
         
         # Audio configuration
         self.speaker_sample_rate = 24000  # 24kHz for TTS audio
+        self.audio_block_size = 1024  # Increased block size for more stable playback
         
         # For handling chunked audio from server
         self.audio_chunks = {}  # Dictionary to store partial audio chunks
@@ -120,7 +121,8 @@ class SimpleAudioClient:
                 samplerate=self.speaker_sample_rate,
                 channels=1,
                 dtype='float32',
-                blocksize=CHUNK_SIZE
+                blocksize=self.audio_block_size,
+                latency='low'  # Request low latency
             )
             self.output_stream.start()
             
@@ -200,6 +202,7 @@ class SimpleAudioClient:
                             if result >= 0:
                                 print("\n🎯 Wake word detected!")
                                 self.in_conversation = True
+                                self.hanging_up = False  # Reset hanging up state
                                 break
                 
                 if self.in_conversation:
@@ -231,7 +234,6 @@ class SimpleAudioClient:
                             print(f"Error in conversation: {e}")
                         finally:
                             await self.disconnect()
-                            self.in_conversation = False
                             print("\nWaiting for wake word 'jarvis'...")
                     else:
                         print("Failed to connect to server. Please check if the server is running.")
@@ -318,6 +320,111 @@ class SimpleAudioClient:
             print(f"Error in send loop: {e}")
             self.in_conversation = False
 
+    async def receive_audio_loop(self):
+        """Receive audio and other messages from server"""
+        try:
+            while self.running and self.websocket and self.in_conversation:
+                # Check if the websocket is closed
+                if hasattr(self.websocket, 'closed') and self.websocket.closed:
+                    print("WebSocket connection closed - stopped receiving")
+                    self.in_conversation = False
+                    break
+                
+                # Wait for a message from the server with a timeout
+                try:
+                    message = await asyncio.wait_for(self.websocket.recv(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # No message received in the timeout period, check if we're still running and try again
+                    if not self.running or not self.in_conversation or (hasattr(self.websocket, 'closed') and self.websocket.closed):
+                        break
+                    continue
+                except websockets.exceptions.ConnectionClosed:
+                    print("Connection closed while waiting for messages")
+                    self.in_conversation = False
+                    break
+                
+                try:
+                    # Parse the message
+                    msg = json.loads(message)
+                    
+                    # Handle audio playback messages
+                    if msg["type"] == "audio_playback":
+                        # Check if this message has the hangup flag
+                        is_hangup = msg["payload"].get("is_hangup", False)
+                        is_final = msg["payload"].get("is_final", False)
+                        
+                        # If this is a hangup message, mark it for proper handling
+                        if is_hangup:
+                            print("📞 Received audio with hangup flag")
+                            self.hanging_up = True
+                            
+                            # If this is a final empty message with hangup flag, end conversation
+                            if is_final and "audio" not in msg["payload"]:
+                                print("📞 Received final hangup signal without audio, ending conversation...")
+                                self.in_conversation = False
+                                break
+                        
+                        # Check if there's audio data to play
+                        if "audio" in msg["payload"]:
+                            # Decode audio data from base64
+                            audio_data = base64.b64decode(msg["payload"]["audio"])
+                            
+                            # Play it directly - no queuing
+                            if audio_data and len(audio_data) > 0:
+                                print(f"Playing audio: hangup={is_hangup}, final={is_final}, size={len(audio_data)}bytes")
+                                self.process_and_play_audio(audio_data)
+                                
+                                # Check if this was the final audio chunk in a hangup sequence
+                                if is_hangup and is_final:
+                                    print("📞 Received final hangup audio, ending conversation...")
+                                    self.in_conversation = False
+                            else:
+                                print("Received empty audio data")
+                    
+                    # Handle status messages (transcription, state updates)
+                    elif msg["type"] == "status":
+                        # Check if we're hanging up
+                        if msg["payload"].get("state") == "hanging_up":
+                            print("Server is hanging up")
+                            self.hanging_up = True
+                            
+                        # Handle speech detection
+                        if "is_speech" in msg["payload"]:
+                            is_speech = msg["payload"]["is_speech"]
+                            if is_speech:
+                                print("🎤 Speech detected...")
+                                
+                        # Handle state transitions
+                        if "state" in msg["payload"]:
+                            state = msg["payload"]["state"]
+                            print(f"🔄 State: {state}")
+                            
+                        # Handle transcription
+                        if "transcription" in msg["payload"]:
+                            text = msg["payload"]["transcription"]["text"]
+                            print(f"🔊 You said: \"{text}\"")
+                    
+                    # Handle error messages
+                    elif msg["type"] == "error":
+                        error = msg["payload"].get("error", "Unknown error")
+                        print(f"❌ Error: {error}")
+                
+                except json.JSONDecodeError:
+                    print(f"Invalid JSON message")
+                except KeyError as e:
+                    print(f"Missing key in message: {e}")
+                except Exception as e:
+                    print(f"Error processing message: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
+        except Exception as e:
+            print(f"Error in receive loop: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.in_conversation = False
+
     def process_and_play_audio(self, audio_data):
         """Process audio data and play it"""
         try:
@@ -355,8 +462,11 @@ class SimpleAudioClient:
             # Play the audio directly
             if hasattr(self, 'output_stream'):
                 print(f"▶️ Playing audio ({len(audio_np)} samples)")
-                self.output_stream.write(audio_np)
-                print("✅ Audio playback complete")
+                try:
+                    self.output_stream.write(audio_np)
+                    print("✅ Audio playback complete")
+                except Exception as e:
+                    print(f"Warning: Audio playback error (non-critical): {e}")
                 
                 # If we're hanging up and this was the final audio chunk, end conversation
                 if self.hanging_up:
@@ -440,6 +550,17 @@ class SimpleAudioClient:
                     print(f"Error closing speaker stream: {e}")
                 finally:
                     self.output_stream = None
+            
+            # Reset conversation state
+            self.hanging_up = False
+            self.in_conversation = False
+            
+            # Clear the audio queue
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
             
         print("Disconnected from server")
 
