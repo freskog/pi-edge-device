@@ -23,7 +23,9 @@ import queue
 import struct
 import urllib.request
 import zipfile
+import subprocess
 from pvporcupine import create
+from led_control import LEDControl
 
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 512
@@ -39,6 +41,10 @@ class SimpleAudioClient:
         self.hanging_up = False  # Track when we're in the process of hanging up
         self.sequence = 0  # Counter for message sequencing
         self.in_conversation = False  # Track if we're in an active conversation
+        self.original_volume = None  # Store original volume level
+        
+        # Initialize LED control
+        self.led_control = LEDControl()
         
         # Audio configuration
         self.speaker_sample_rate = 24000  # 24kHz for TTS audio
@@ -56,7 +62,7 @@ class SimpleAudioClient:
         if not access_key:
             raise RuntimeError("Missing Picovoice access key. Set PICOVOICE_ACCESS_KEY environment variable.")
         
-        self.porcupine = create(access_key=access_key, keywords=["jarvis"])
+        self.porcupine = create(access_key=access_key, keywords=["porcupine"])
         print("Wakeword detection initialized successfully")
         
         # Try to import the signal module for resampling
@@ -107,6 +113,47 @@ class SimpleAudioClient:
             self.cleanup()
             return False
 
+    def get_system_volume(self):
+        """Get current system volume as a percentage"""
+        try:
+            # Get volume of main_out sink
+            result = subprocess.run(['pactl', 'list', 'sinks'], 
+                                 capture_output=True, text=True)
+            
+            # Find the main_out sink section
+            sink_sections = result.stdout.split('\n\n')
+            main_out_section = None
+            for section in sink_sections:
+                if 'Sink #4' in section or 'main_out' in section:
+                    main_out_section = section
+                    break
+            
+            if main_out_section:
+                # Extract volume percentage
+                for line in main_out_section.split('\n'):
+                    if 'Volume:' in line:
+                        # Parse the volume percentage from the line
+                        # Format is typically: Volume: front-left: 65536 / 100% / 0.00 dB
+                        volume_str = line.split('/')[1].strip()
+                        volume_percent = int(volume_str.replace('%', ''))
+                        return volume_percent
+            
+            print("Could not find main_out sink volume")
+            return None
+        except Exception as e:
+            print(f"Error getting system volume: {e}")
+            return None
+
+    def set_system_volume(self, volume_percent):
+        """Set system volume to specified percentage (0-100)"""
+        try:
+            # Set volume of main_out sink
+            subprocess.run(['pactl', 'set-sink-volume', 'main_out', f'{volume_percent}%'])
+            return True
+        except Exception as e:
+            print(f"Error setting system volume: {e}")
+            return False
+
     async def connect(self):
         """Connect to server and initialize audio devices"""
         try:
@@ -114,6 +161,12 @@ class SimpleAudioClient:
             print(f"Connecting to {self.server_url}...")
             self.websocket = await websockets.connect(self.server_url)
             print("Connected to server")
+            
+            # Store original volume and set to 55%
+            self.original_volume = self.get_system_volume()
+            if self.original_volume is not None:
+                print(f"Setting volume to 75% (was {self.original_volume}%)")
+                self.set_system_volume(75)
             
             # Initialize speaker output stream
             print("Initializing speaker...")
@@ -166,6 +219,10 @@ class SimpleAudioClient:
             finally:
                 self.porcupine = None
         
+        # Clean up LED control
+        if hasattr(self, 'led_control'):
+            self.led_control.cleanup()
+        
         print("Audio resources cleaned up")
 
     async def run(self):
@@ -175,10 +232,8 @@ class SimpleAudioClient:
             
         self.running = True
         
-        print("\n========== EDGE DEVICE SIMULATOR ==========")
-        print("Waiting for wake word 'jarvis'...")
-        print("Receiving audio will play through speakers")
-        print("\n⚠️  IMPORTANT: Use headphones to prevent echo!")
+        print("\n========== EDGE DEVICE ==========")
+        print("Waiting for wake word 'porcupine'...")
         print("==========================================")
         print("Press Ctrl+C to exit\n")
         
@@ -201,8 +256,12 @@ class SimpleAudioClient:
                             result = self.porcupine.process(frame)
                             if result >= 0:
                                 print("\n🎯 Wake word detected!")
+                                # Store the remaining buffer for sending
+                                self.wakeword_audio = buffer.copy()
                                 self.in_conversation = True
                                 self.hanging_up = False  # Reset hanging up state
+                                # Trigger LED wake state
+                                self.led_control.wake_detected()
                                 break
                 
                 if self.in_conversation:
@@ -210,6 +269,21 @@ class SimpleAudioClient:
                     if await self.connect():
                         print("Starting conversation...")
                         try:
+                            # Send the buffered audio first
+                            if hasattr(self, 'wakeword_audio') and len(self.wakeword_audio) > 0:
+                                message = {
+                                    "type": "audio_stream",
+                                    "timestamp": time.time(),
+                                    "sequence": self.sequence,
+                                    "payload": {
+                                        "audio": base64.b64encode(self.wakeword_audio.tobytes()).decode('utf-8')
+                                    }
+                                }
+                                self.sequence += 1
+                                await self.websocket.send(json.dumps(message))
+                                print("Sent buffered audio after wakeword")
+                                delattr(self, 'wakeword_audio')  # Clear the buffer
+                            
                             send_task = asyncio.create_task(self.send_audio_loop())
                             receive_task = asyncio.create_task(self.receive_audio_loop())
                             
@@ -234,7 +308,9 @@ class SimpleAudioClient:
                             print(f"Error in conversation: {e}")
                         finally:
                             await self.disconnect()
-                            print("\nWaiting for wake word 'jarvis'...")
+                            # Turn off LEDs when conversation ends
+                            self.led_control.conversation_ended()
+                            print("\nWaiting for wake word 'porcupine'...")
                     else:
                         print("Failed to connect to server. Please check if the server is running.")
                         print("Retrying in 5 seconds... (Press Ctrl+C to exit)")
@@ -550,6 +626,12 @@ class SimpleAudioClient:
                     print(f"Error closing speaker stream: {e}")
                 finally:
                     self.output_stream = None
+            
+            # Restore original volume
+            if self.original_volume is not None:
+                print(f"Restoring volume to {self.original_volume}%")
+                self.set_system_volume(self.original_volume)
+                self.original_volume = None
             
             # Reset conversation state
             self.hanging_up = False

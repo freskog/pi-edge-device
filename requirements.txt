@@ -3,3 +3,4 @@ pvporcupine>=2.2.0
 soundfile
 sounddevice
 websockets
+pyusb
