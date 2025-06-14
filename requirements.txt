@@ -1,6 +1,9 @@
 numpy>=1.22.0,<2
-pvporcupine>=2.2.0
 soundfile
 sounddevice
 websockets
 pyusb
+openwakeword
+webrtcvad
+scipy
+pixel-ring
