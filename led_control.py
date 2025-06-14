@@ -1,10 +1,9 @@
 """
 LED Ring Control Module
 
-Controls the LED ring on the ReSpeaker 4-Mic Array (USB) v2.0 with different states:
+Controls the LED ring on the ReSpeaker 4-Mic Array (USB) v2.0 with two states:
 - OFF: LEDs are off (default state)
-- WAKE: LEDs flash briefly when wake word is detected
-- ACTIVE: LEDs are on during active conversation
+- ACTIVE: LEDs are solid blue during active conversation
 
 Requires:
 pip install pixel-ring
@@ -42,52 +41,59 @@ class LEDControl:
             print("   LED control will be disabled")
             self.pixel_ring = None
         
-    def _set_led_state(self, state):
-        """Set LED state using PixelRing"""
-        if self.pixel_ring is None:
-            print(f"LED State (disabled): {state}")
-            return
-            
-        try:
-            if state == "OFF":
-                # Turn all LEDs off
-                self.pixel_ring.off()
-                print("LED State: OFF")
-            elif state == "WAKE":
-                # Flash effect - blue color
-                self.pixel_ring.set_color(r=0, g=0, b=255)
-                print("LED State: WAKE (flash)")
-            elif state == "ACTIVE":
-                # Solid blue color
+    def set_active(self):
+        """Set LED to active (solid blue)"""
+        with self._lock:
+            if self.pixel_ring is None:
+                print("LED State (disabled): ACTIVE")
+                return
+            try:
                 self.pixel_ring.set_color(r=0, g=0, b=255)
                 print("LED State: ACTIVE")
-            
-        except Exception as e:
-            print(f"Error setting LED state: {e}")
+                self.state = "ACTIVE"
+            except Exception as e:
+                print(f"Error setting LED state: {e}")
     
-    def wake_detected(self):
-        """Handle wake word detection"""
+    def set_tool_active(self):
+        """Set LED to tool active state (flashing blue)"""
         with self._lock:
-            self._set_led_state("WAKE")
-            # Flash briefly then turn on
-            time.sleep(0.5)
-            self._set_led_state("ACTIVE")
-            self.state = "ACTIVE"
+            if self.pixel_ring is None:
+                print("LED State (disabled): TOOL_ACTIVE")
+                return
+            try:
+                # Start a flashing pattern
+                self.pixel_ring.think()  # Use think() for flashing pattern
+                print("LED State: TOOL_ACTIVE")
+                self.state = "TOOL_ACTIVE"
+            except Exception as e:
+                print(f"Error setting LED state: {e}")
     
-    def conversation_started(self):
-        """Handle conversation start"""
+    def set_error(self):
+        """Set LED to error state (solid red)"""
         with self._lock:
-            self._set_led_state("ACTIVE")
-            self.state = "ACTIVE"
+            if self.pixel_ring is None:
+                print("LED State (disabled): ERROR")
+                return
+            try:
+                self.pixel_ring.set_color(r=255, g=0, b=0)
+                print("LED State: ERROR")
+                self.state = "ERROR"
+            except Exception as e:
+                print(f"Error setting LED state: {e}")
     
-    def conversation_ended(self):
-        """Handle conversation end"""
+    def set_off(self):
+        """Turn off LEDs"""
         with self._lock:
-            self._set_led_state("OFF")
-            self.state = "OFF"
+            if self.pixel_ring is None:
+                print("LED State (disabled): OFF")
+                return
+            try:
+                self.pixel_ring.off()
+                print("LED State: OFF")
+                self.state = "OFF"
+            except Exception as e:
+                print(f"Error setting LED state: {e}")
     
     def cleanup(self):
         """Clean up LED resources"""
-        with self._lock:
-            self._set_led_state("OFF")
-            self.state = "OFF" 
+        self.set_off() 
